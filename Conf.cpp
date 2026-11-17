@@ -1,80 +1,98 @@
 /*
- *   Copyright (C) 2017-2020 by Jonathan Naylor G4KLX
+ *   Copyright (C) 2016,2017 by Jonathan Naylor G4KLX
  *
  *   This program is free software; you can redistribute it and/or modify
  *   it under the terms of the GNU General Public License as published by
  *   the Free Software Foundation; either version 2 of the License, or
  *   (at your option) any later version.
- *
- *   This program is distributed in the hope that it will be useful,
- *   but WITHOUT ANY WARRANTY; without even the implied warranty of
- *   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *   GNU General Public License for more details.
- *
- *   You should have received a copy of the GNU General Public License
- *   along with this program; if not, write to the Free Software
- *   Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
  */
 
 #include "Conf.h"
-#include "Log.h"
 
-#include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <cctype>
+#include <cstdint>      // ← 新增：uint32_t
+#include <string>
+#include <vector>
+#include <algorithm>
 
-const int BUFFER_SIZE = 500;
+#if !defined(_WIN32) && !defined(_WIN64)
+#include <strings.h>
+#endif
 
-bool CConf::myIsSpace(int c)
+const int BUFFER_SIZE = 512;
+
+// ─────────────────────────── 工具函数 ───────────────────────────
+
+static bool myStrToBool(const std::string& s)
 {
-	return c == ' ' || c == '\t' || c == '\r' || c == '\n';
+    std::string t = s;
+    std::transform(t.begin(), t.end(), t.begin(), ::tolower);
+    return t == "1" || t == "yes" || t == "true" || t == "on";
 }
 
-std::string CConf::myTrim(const std::string& s)
+static uint16_t myStrToUInt16(const std::string& s, uint16_t def = 0U)
 {
-	if (s.empty())
-		return s;
-
-	std::string::size_type start = 0U;
-	while (start < s.size() && myIsSpace(s[start]))
-		start++;
-
-	if (start == s.size())
-		return std::string();
-
-	std::string::size_type end = s.size() - 1U;
-	while (end > start && myIsSpace(s[end]))
-		end--;
-
-	return s.substr(start, end - start + 1U);
+    char* end = nullptr;
+    long v = ::strtol(s.c_str(), &end, 10);
+    if (end == s.c_str() || v < 0 || v > 65535)
+        return def;
+    return (uint16_t)v;
 }
+
+static uint32_t myStrToUInt32(const std::string& s, uint32_t def = 0U)
+{
+    char* end = nullptr;
+    unsigned long v = ::strtoul(s.c_str(), &end, 10);
+    if (end == s.c_str())
+        return def;
+    return (uint32_t)v;
+}
+
+static std::string trim(const std::string& s)
+{
+    size_t a = s.find_first_not_of(" \t\r\n");
+    if (a == std::string::npos) return {};
+    size_t b = s.find_last_not_of(" \t\r\n");
+    return s.substr(a, b - a + 1);
+}
+
+// 解析 "1234,5678,9012" → vector<uint32_t>
+static std::vector<uint32_t> parseIDList(const std::string& s)
+{
+    std::vector<uint32_t> list;
+    size_t pos = 0;
+    while (pos < s.size()) {
+        size_t comma = s.find(',', pos);
+        std::string tok = trim(s.substr(pos, comma == std::string::npos ? std::string::npos : comma - pos));
+        if (!tok.empty()) {
+            uint32_t id = myStrToUInt32(tok, 0U);
+            if (id > 0U)
+                list.push_back(id);
+        }
+        if (comma == std::string::npos) break;
+        pos = comma + 1U;
+    }
+    return list;
+}
+
+// ─────────────────────────── 构造 / 析构 ───────────────────────────
 
 CConf::CConf(const std::string& file) :
 m_file(file),
-m_section(SECTION_NONE),
 m_callsign(),
-m_timeout(30U),
-m_slot1(true),
-m_slot2(false),
-m_rfh(false),
-m_latitude(),
-m_longitude(),
-m_description(),
+m_password(),
+m_masterHost(),
+m_masterPort(0U),
+m_backupHost(),
+m_backupPort(0U),
+m_localHost(),
+m_localPort(0U),
 m_whiteList(),
 m_blackList(),
-m_mqttAddress(),
-m_mqttPort(1883U),
-m_mqttLogin(),
-m_mqttPassword(),
-m_mqttDebug(false),
-m_logDisplay(true),
-m_logLevel(2U),
-m_logFilePath(),
-m_logFileRotate(true),
-m_logFileSize(100U),
-m_logFileCount(10U)
+m_debug(false)
 {
 }
 
@@ -82,264 +100,84 @@ CConf::~CConf()
 {
 }
 
+// ─────────────────────────── 读取配置 ───────────────────────────
+
 bool CConf::read()
 {
-	FILE* fp = ::fopen(m_file.c_str(), "rt");
-	if (fp == NULL) {
-		::fprintf(stderr, "Couldn't open the .ini file - %s\n", m_file.c_str());
-		return false;
-	}
+    FILE* fp = ::fopen(m_file.c_str(), "rt");
+    if (fp == nullptr) {
+        ::fprintf(stderr, "Cannot open the config file - %s\n", m_file.c_str());
+        return false;
+    }
 
-	char buffer[BUFFER_SIZE];
-	while (::fgets(buffer, BUFFER_SIZE, fp) != NULL) {
-		std::string line(myTrim(buffer));
+    char buffer[BUFFER_SIZE];
+    while (::fgets(buffer, BUFFER_SIZE, fp) != nullptr) {
+        // 去注释
+        char* p = ::strchr(buffer, '#');
+        if (p != nullptr) *p = '\0';
 
-		if (line.empty() || line.at(0U) == '#')
-			continue;
+        std::string line = trim(buffer);
+        if (line.empty()) continue;
 
-		if (line.at(0U) == '[') {
-			std::string::size_type pos = line.find(']');
-			if (pos == std::string::npos) {
-				::fclose(fp);
-				::fprintf(stderr, "Invalid section in the .ini file - %s\n", line.c_str());
-				return false;
-			}
+        // 拆 key = value
+        size_t eq = line.find('=');
+        if (eq == std::string::npos) continue;
 
-			std::string section = myTrim(line.substr(1U, pos - 1U));
+        std::string key   = trim(line.substr(0U, eq));
+        std::string value = trim(line.substr(eq + 1U));
 
-			if (section == "General")
-				m_section = SECTION_GENERAL;
-			else if (section == "MQTT")
-				m_section = SECTION_MQTT;
-			else if (section == "Log")
-				m_section = SECTION_LOGGING;
-			else
-				m_section = SECTION_NONE;
+        if (key == "Callsign")        m_callsign   = value;
+        else if (key == "Password")   m_password   = value;
 
-			continue;
-		}
+        else if (key == "MasterHost") m_masterHost = value;
+        else if (key == "MasterPort") m_masterPort = myStrToUInt16(value, 8070U);
+        else if (key == "BackupHost") m_backupHost = value;
+        else if (key == "BackupPort") m_backupPort = myStrToUInt16(value, 8070U);
 
-		std::string::size_type pos = line.find('=');
-		if (pos == std::string::npos) {
-			::fclose(fp);
-			::fprintf(stderr, "Invalid line in the .ini file - %s\n", line.c_str());
-			return false;
-		}
+        else if (key == "LocalHost")  m_localHost  = value;
+        else if (key == "LocalPort")  m_localPort  = myStrToUInt16(value, 7620U);
 
-		std::string key   = myTrim(line.substr(0U, pos));
-		std::string value = myTrim(line.substr(pos + 1U));
+        else if (key == "WhiteList")  m_whiteList  = parseIDList(value);
+        else if (key == "BlackList")  m_blackList  = parseIDList(value);
 
-		bool valid = true;
+        else if (key == "Debug")      m_debug      = myStrToBool(value);
+    }
 
-		switch (m_section) {
-			case SECTION_GENERAL:
-				if (key == "Callsign")
-					m_callsign = value;
-				else if (key == "Timeout")
-					m_timeout = (unsigned int)::atoi(value.c_str());
-				else if (key == "Slot1")
-					m_slot1 = ::atoi(value.c_str()) == 1;
-				else if (key == "Slot2")
-					m_slot2 = ::atoi(value.c_str()) == 1;
-				else if (key == "RFH")
-					m_rfh = ::atoi(value.c_str()) == 1;
-				else if (key == "Latitude")
-					m_latitude = value;
-				else if (key == "Longitude")
-					m_longitude = value;
-				else if (key == "Description")
-					m_description = value;
-				else if (key == "WhiteList")
-					valid = readList(value, m_whiteList);
-				else if (key == "BlackList")
-					valid = readList(value, m_blackList);
-				else
-					valid = false;
-				break;
+    ::fclose(fp);
 
-			case SECTION_MQTT:
-				if (key == "Address")
-					m_mqttAddress = value;
-				else if (key == "Port")
-					m_mqttPort = (unsigned int)::atoi(value.c_str());
-				else if (key == "Login")
-					m_mqttLogin = value;
-				else if (key == "Password")
-					m_mqttPassword = value;
-				else if (key == "Debug")
-					m_mqttDebug = ::atoi(value.c_str()) == 1;
-				else
-					valid = false;
-				break;
+    // 必填校验
+    if (m_callsign.empty()) {
+        ::fprintf(stderr, "Config: Callsign is missing\n");
+        return false;
+    }
+    if (m_password.empty()) {
+        ::fprintf(stderr, "Config: Password is missing\n");
+        return false;
+    }
+    if (m_masterHost.empty()) {
+        ::fprintf(stderr, "Config: MasterHost is missing\n");
+        return false;
+    }
+    if (m_localHost.empty())
+        m_localHost = "127.0.0.1";
 
-			case SECTION_LOGGING:
-				if (key == "DisplayLevel")
-					m_logDisplay = ::atoi(value.c_str()) == 1;
-				else if (key == "Level")
-					m_logLevel = (unsigned int)::atoi(value.c_str());
-				else if (key == "FilePath")
-					m_logFilePath = value;
-				else if (key == "FileRotate")
-					m_logFileRotate = ::atoi(value.c_str()) == 1;
-				else if (key == "FileSize")
-					m_logFileSize = (unsigned int)::atoi(value.c_str());
-				else if (key == "FileCount")
-					m_logFileCount = (unsigned int)::atoi(value.c_str());
-				else
-					valid = false;
-				break;
-
-			default:
-				::fprintf(stderr, "Unknown section in the .ini file - %s\n", line.c_str());
-				break;
-		}
-
-		if (!valid)
-			LogWarning("Invalid keyword/value in the .ini file - %s", line.c_str());
-	}
-
-	::fclose(fp);
-
-	return true;
+    return true;
 }
 
-bool CConf::readList(const std::string& value, std::vector<unsigned int>& list) const
-{
-	list.clear();
+// ─────────────────────────── Getter ───────────────────────────
 
-	if (value.empty())
-		return true;
+std::string CConf::getCallsign() const { return m_callsign; }
+std::string CConf::getPassword() const { return m_password; }
 
-	std::string::size_type start = 0U;
-	while (start < value.size()) {
-		while (start < value.size() && value[start] == ',')
-			start++;
+std::string CConf::getMasterHost() const { return m_masterHost; }
+uint16_t    CConf::getMasterPort() const { return m_masterPort; }
+std::string CConf::getBackupHost() const { return m_backupHost; }
+uint16_t    CConf::getBackupPort() const { return m_backupPort; }
 
-		if (start == value.size())
-			break;
+std::string CConf::getLocalHost() const { return m_localHost; }
+uint16_t    CConf::getLocalPort() const { return m_localPort; }
 
-		std::string::size_type end = value.find(',', start);
-		if (end == std::string::npos)
-			end = value.size();
+std::vector<uint32_t> CConf::getWhiteList() const { return m_whiteList; }
+std::vector<uint32_t> CConf::getBlackList() const { return m_blackList; }
 
-		std::string token = myTrim(value.substr(start, end - start));
-		if (!token.empty()) {
-			char* p = NULL;
-			unsigned long id = ::strtoul(token.c_str(), &p, 10);
-			if (p != NULL && *p != '\0') {
-				::fprintf(stderr, "Invalid numeric entry in list - %s\n", token.c_str());
-				return false;
-			}
-			list.push_back((unsigned int)id);
-		}
-
-		start = end;
-	}
-
-	return true;
-}
-
-std::string CConf::getCallsign() const
-{
-	return m_callsign;
-}
-
-unsigned int CConf::getTimeout() const
-{
-	return m_timeout;
-}
-
-bool CConf::getSlot1() const
-{
-	return m_slot1;
-}
-
-bool CConf::getSlot2() const
-{
-	return m_slot2;
-}
-
-bool CConf::getRFH() const
-{
-	return m_rfh;
-}
-
-std::string CConf::getLatitude() const
-{
-	return m_latitude;
-}
-
-std::string CConf::getLongitude() const
-{
-	return m_longitude;
-}
-
-std::string CConf::getDescription() const
-{
-	return m_description;
-}
-
-std::vector<uint32_t> CConf::getWhiteList() const
-{
-	return m_whiteList;
-}
-
-std::vector<uint32_t> CConf::getBlackList() const
-{
-	return m_blackList;
-}
-
-std::string CConf::getMQTTAddress() const
-{
-	return m_mqttAddress;
-}
-
-unsigned int CConf::getMQTTPort() const
-{
-	return m_mqttPort;
-}
-
-std::string CConf::getMQTTLogin() const
-{
-	return m_mqttLogin;
-}
-
-std::string CConf::getMQTTPassword() const
-{
-	return m_mqttPassword;
-}
-
-bool CConf::getMQTTDebug() const
-{
-	return m_mqttDebug;
-}
-
-bool CConf::getLogDisplay() const
-{
-	return m_logDisplay;
-}
-
-unsigned int CConf::getLogLevel() const
-{
-	return m_logLevel;
-}
-
-std::string CConf::getLogFilePath() const
-{
-	return m_logFilePath;
-}
-
-bool CConf::getLogFileRotate() const
-{
-	return m_logFileRotate;
-}
-
-unsigned int CConf::getLogFileSize() const
-{
-	return m_logFileSize;
-}
-
-unsigned int CConf::getLogFileCount() const
-{
-	return m_logFileCount;
-}
+bool CConf::getDebug() const { return m_debug; }
