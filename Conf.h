@@ -21,6 +21,8 @@
 
 #include <string>
 #include <vector>
+#include <cctype>
+#include <cstdint>
 
 class CConf
 {
@@ -32,8 +34,8 @@ public:
 
   // The General section
   std::string  getCallsign() const;
-  std::vector<unsigned int> getWhiteList() const;
-  std::vector<unsigned int> getBlackList() const;
+  std::vector<uint32_t> getWhiteList() const;
+  std::vector<uint32_t> getBlackList() const;
   std::string  getblacklistRegexfile() const;
   std::string  getwhitelistRegexfile() const;
   std::string  getRptAddress() const;
