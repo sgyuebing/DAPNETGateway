@@ -1,88 +1,88 @@
-/*
- *   Copyright (C) 2018 by Jonathan Naylor G4KLX
- *
- *   This program is free software; you can redistribute it and/or modify
- *   it under the terms of the GNU General Public License as published by
- *   the Free Software Foundation; either version 2 of the License, or
- *   (at your option) any later version.
- *
- *   This program is distributed in the hope that it will be useful,
- *   but WITHOUT ANY WARRANTY; without even the implied warranty of
- *   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *   GNU General Public License for more details.
- *
- *   You should have received a copy of the GNU General Public License
- *   along with this program; if not, write to the Free Software
- *   Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
- */
-
 #if !defined(CONF_H)
-#define CONF_H
+#define	CONF_H
 
+#include <cstdint>
 #include <string>
 #include <vector>
-#include <cstdint>   // uint32_t  —— GCC 14 起不再由 <string>/<vector> 间接带入，必须显式包含
-#include <cstddef>   // size_t
 
 class CConf
 {
 public:
-  CConf(const std::string& file);
-  ~CConf();
+	enum SECTION {
+		SECTION_NONE,
+		SECTION_GENERAL,
+		SECTION_MQTT,
+		SECTION_LOGGING
+	};
 
-  bool read();
+	CConf(const std::string& file);
+	~CConf();
 
-  // The General section
-  std::string           getCallsign() const;
-  std::vector<uint32_t> getWhiteList() const;   // ← 与成员变量、.cpp 实现统一为 uint32_t
-  std::vector<uint32_t> getBlackList() const;
-  std::string           getblacklistRegexfile() const;
-  std::string           getwhitelistRegexfile() const;
-  std::string           getRptAddress() const;
-  unsigned short        getRptPort() const;
-  std::string           getMyAddress() const;
-  unsigned short        getMyPort() const;
-  bool                  getDaemon() const;
+	bool read();
 
-  // The Log section
-  unsigned int getLogDisplayLevel() const;
-  unsigned int getLogFileLevel() const;
-  std::string  getLogFilePath() const;
-  std::string  getLogFileRoot() const;
-  bool         getLogFileRotate() const;
+	// Section General
+	std::string  getCallsign() const;
+	unsigned int getTimeout() const;
+	bool         getSlot1() const;
+	bool         getSlot2() const;
+	bool         getRFH() const;
+	std::string  getLatitude() const;
+	std::string  getLongitude() const;
+	std::string  getDescription() const;
+	std::vector<unsigned int> getWhiteList() const;
+	std::vector<unsigned int> getBlackList() const;
 
-  // The DAPNET section
-  std::string    getDAPNETAddress() const;
-  unsigned short getDAPNETPort() const;
-  std::string    getDAPNETAuthKey() const;
-  bool           getDAPNETDebug() const;
+	// Section MQTT
+	std::string  getMQTTAddress() const;
+	unsigned int getMQTTPort() const;
+	std::string  getMQTTLogin() const;
+	std::string  getMQTTPassword() const;
+	bool         getMQTTDebug() const;
+
+	// Section Logging
+	bool         getLogDisplay() const;
+	unsigned int getLogLevel() const;
+	std::string  getLogFilePath() const;
+	bool         getLogFileRotate() const;
+	unsigned int getLogFileSize() const;
+	unsigned int getLogFileCount() const;
 
 private:
-  std::string m_file;
+	std::string m_file;
 
-  std::string           m_callsign;
-  std::vector<uint32_t> m_whiteList;     // was: std::vector<unsigned int>
-  std::vector<uint32_t> m_blackList;     // was: std::vector<unsigned int>
+	SECTION m_section;
 
-  std::string    m_blacklistRegexfile;
-  std::string    m_whitelistRegexfile;
-  std::string    m_rptAddress;
-  unsigned short m_rptPort;
-  std::string    m_myAddress;
-  unsigned short m_myPort;
-  bool           m_daemon;
+	// Section General
+	std::string  m_callsign;
+	unsigned int m_timeout;
+	bool         m_slot1;
+	bool         m_slot2;
+	bool         m_rfh;
+	std::string  m_latitude;
+	std::string  m_longitude;
+	std::string  m_description;
+	std::vector<unsigned int> m_whiteList;
+	std::vector<unsigned int> m_blackList;
 
-  unsigned int m_logDisplayLevel;
-  unsigned int m_logFileLevel;
-  std::string  m_logFilePath;
-  std::string  m_logFileRoot;
-  bool         m_logFileRotate;
+	// Section MQTT
+	std::string  m_mqttAddress;
+	unsigned int m_mqttPort;
+	std::string  m_mqttLogin;
+	std::string  m_mqttPassword;
+	bool         m_mqttDebug;
 
-  std::string    m_dapnetAddress;
-  unsigned short m_dapnetAuthKeyPortPlaceholder;   // ← 见下方说明，可删
-  unsigned short m_dapnetPort;
-  std::string    m_dapnetAuthKey;
-  bool           m_dapnetDebug;
+	// Section Logging
+	bool         m_logDisplay;
+	unsigned int m_logLevel;
+	std::string  m_logFilePath;
+	bool         m_logFileRotate;
+	unsigned int m_logFileSize;
+	unsigned int m_logFileCount;
+
+	static bool      myIsSpace(int c);
+	static std::string myTrim(const std::string& s);
+
+	bool readList(const std::string& value, std::vector<unsigned int>& list) const;
 };
 
-#endif // CONF_H
+#endif /* CONF_H */
