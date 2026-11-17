@@ -17,12 +17,12 @@
  */
 
 #if !defined(CONF_H)
-#define	CONF_H
+#define CONF_H
 
 #include <string>
 #include <vector>
-#include <cctype>
-#include <cstdint>
+#include <cstdint>   // uint32_t  —— GCC 14 起不再由 <string>/<vector> 间接带入，必须显式包含
+#include <cstddef>   // size_t
 
 class CConf
 {
@@ -33,16 +33,16 @@ public:
   bool read();
 
   // The General section
-  std::string  getCallsign() const;
-  std::vector<uint32_t> getWhiteList() const;
+  std::string           getCallsign() const;
+  std::vector<uint32_t> getWhiteList() const;   // ← 与成员变量、.cpp 实现统一为 uint32_t
   std::vector<uint32_t> getBlackList() const;
-  std::string  getblacklistRegexfile() const;
-  std::string  getwhitelistRegexfile() const;
-  std::string  getRptAddress() const;
-  unsigned short getRptPort() const;
-  std::string  getMyAddress() const;
-  unsigned short getMyPort() const;
-  bool         getDaemon() const;
+  std::string           getblacklistRegexfile() const;
+  std::string           getwhitelistRegexfile() const;
+  std::string           getRptAddress() const;
+  unsigned short        getRptPort() const;
+  std::string           getMyAddress() const;
+  unsigned short        getMyPort() const;
+  bool                  getDaemon() const;
 
   // The Log section
   unsigned int getLogDisplayLevel() const;
@@ -52,25 +52,25 @@ public:
   bool         getLogFileRotate() const;
 
   // The DAPNET section
-  std::string  getDAPNETAddress() const;
+  std::string    getDAPNETAddress() const;
   unsigned short getDAPNETPort() const;
-  std::string  getDAPNETAuthKey() const;
-  bool         getDAPNETDebug() const;
+  std::string    getDAPNETAuthKey() const;
+  bool           getDAPNETDebug() const;
 
 private:
-  std::string  m_file;
+  std::string m_file;
 
-  std::string  m_callsign;
-  std::vector<unsigned int> m_whiteList;
-  std::vector<unsigned int> m_blackList;
+  std::string           m_callsign;
+  std::vector<uint32_t> m_whiteList;     // was: std::vector<unsigned int>
+  std::vector<uint32_t> m_blackList;     // was: std::vector<unsigned int>
 
-  std::string  m_blacklistRegexfile;
-  std::string  m_whitelistRegexfile;
-  std::string  m_rptAddress;
+  std::string    m_blacklistRegexfile;
+  std::string    m_whitelistRegexfile;
+  std::string    m_rptAddress;
   unsigned short m_rptPort;
-  std::string  m_myAddress;
+  std::string    m_myAddress;
   unsigned short m_myPort;
-  bool         m_daemon;
+  bool           m_daemon;
 
   unsigned int m_logDisplayLevel;
   unsigned int m_logFileLevel;
@@ -78,10 +78,11 @@ private:
   std::string  m_logFileRoot;
   bool         m_logFileRotate;
 
-  std::string  m_dapnetAddress;
+  std::string    m_dapnetAddress;
+  unsigned short m_dapnetAuthKeyPortPlaceholder;   // ← 见下方说明，可删
   unsigned short m_dapnetPort;
-  std::string  m_dapnetAuthKey;
-  bool         m_dapnetDebug;
+  std::string    m_dapnetAuthKey;
+  bool           m_dapnetDebug;
 };
 
-#endif
+#endif // CONF_H
