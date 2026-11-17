@@ -1,5 +1,5 @@
 /*
- *   Copyright (C) 2018,2020 by Jonathan Naylor G4KLX
+ *   Copyright (C) 2017-2020 by Jonathan Naylor G4KLX
  *
  *   This program is free software; you can redistribute it and/or modify
  *   it under the terms of the GNU General Public License as published by
@@ -19,6 +19,7 @@
 #include "Conf.h"
 #include "Log.h"
 
+#include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -26,33 +27,54 @@
 
 const int BUFFER_SIZE = 500;
 
-enum SECTION {
-  SECTION_NONE,
-  SECTION_GENERAL,
-  SECTION_LOG,
-  SECTION_DAPNET
-};
+bool CConf::myIsSpace(int c)
+{
+	return c == ' ' || c == '\t' || c == '\r' || c == '\n';
+}
+
+std::string CConf::myTrim(const std::string& s)
+{
+	if (s.empty())
+		return s;
+
+	std::string::size_type start = 0U;
+	while (start < s.size() && myIsSpace(s[start]))
+		start++;
+
+	if (start == s.size())
+		return std::string();
+
+	std::string::size_type end = s.size() - 1U;
+	while (end > start && myIsSpace(s[end]))
+		end--;
+
+	return s.substr(start, end - start + 1U);
+}
 
 CConf::CConf(const std::string& file) :
 m_file(file),
+m_section(SECTION_NONE),
 m_callsign(),
+m_timeout(30U),
+m_slot1(true),
+m_slot2(false),
+m_rfh(false),
+m_latitude(),
+m_longitude(),
+m_description(),
 m_whiteList(),
-m_blacklistRegexfile(),
-m_whitelistRegexfile(),
-m_rptAddress(),
-m_rptPort(0U),
-m_myAddress(),
-m_myPort(0U),
-m_daemon(false),
-m_logDisplayLevel(0U),
-m_logFileLevel(0U),
+m_blackList(),
+m_mqttAddress(),
+m_mqttPort(1883U),
+m_mqttLogin(),
+m_mqttPassword(),
+m_mqttDebug(false),
+m_logDisplay(true),
+m_logLevel(2U),
 m_logFilePath(),
-m_logFileRoot(),
 m_logFileRotate(true),
-m_dapnetAddress(),
-m_dapnetPort(0U),
-m_dapnetAuthKey(),
-m_dapnetDebug(false)
+m_logFileSize(100U),
+m_logFileCount(10U)
 {
 }
 
@@ -68,115 +90,112 @@ bool CConf::read()
 		return false;
 	}
 
-	SECTION section = SECTION_NONE;
-
 	char buffer[BUFFER_SIZE];
 	while (::fgets(buffer, BUFFER_SIZE, fp) != NULL) {
-		if (buffer[0U] == '#')
+		std::string line(myTrim(buffer));
+
+		if (line.empty() || line.at(0U) == '#')
 			continue;
 
-		if (buffer[0U] == '[') {
-			if (::strncmp(buffer, "[General]", 9U) == 0)
-				section = SECTION_GENERAL;
-			else if (::strncmp(buffer, "[Log]", 5U) == 0)
-				section = SECTION_LOG;
-			else if (::strncmp(buffer, "[DAPNET]", 8U) == 0)
-				section = SECTION_DAPNET;
+		if (line.at(0U) == '[') {
+			std::string::size_type pos = line.find(']');
+			if (pos == std::string::npos) {
+				::fclose(fp);
+				::fprintf(stderr, "Invalid section in the .ini file - %s\n", line.c_str());
+				return false;
+			}
+
+			std::string section = myTrim(line.substr(1U, pos - 1U));
+
+			if (section == "General")
+				m_section = SECTION_GENERAL;
+			else if (section == "MQTT")
+				m_section = SECTION_MQTT;
+			else if (section == "Log")
+				m_section = SECTION_LOGGING;
 			else
-				section = SECTION_NONE;
+				m_section = SECTION_NONE;
 
 			continue;
 		}
 
-		char* key = ::strtok(buffer, " \t=\r\n");
-		if (key == NULL)
-			  continue;
-
-		char* value = ::strtok(NULL, "\r\n");
-		if (value == NULL)
-			  continue;
-
-		// Remove quotes from the value
-		size_t len = ::strlen(value);
-		if (len > 1U && *value == '"' && value[len - 1U] == '"') {
-			value[len - 1U] = '\0';
-			value++;
-		} else {
-			char *p;
-
-			// if value is not quoted, remove after # (to make comment)
-			if ((p = strchr(value, '#')) != NULL)
-				*p = '\0';
-
-			// remove trailing tab/space
-			for (p = value + strlen(value) - 1U; p >= value && (*p == '\t' || *p == ' '); p--)
-				*p = '\0';
+		std::string::size_type pos = line.find('=');
+		if (pos == std::string::npos) {
+			::fclose(fp);
+			::fprintf(stderr, "Invalid line in the .ini file - %s\n", line.c_str());
+			return false;
 		}
 
-		if (section == SECTION_GENERAL) {
-			if (::strcmp(key, "Callsign") == 0) {
-				for (unsigned int i = 0U; value[i] != '\0'; i++) {
-					if (!::isspace(value[i]))
-						m_callsign.insert(m_callsign.end(), 1, value[i]);
-				}
-			}
-			else if (::strcmp(key, "WhiteList") == 0) {
-				char* p = ::strtok(value, ",\r\n");
-				while (p != NULL) {
-					unsigned int ric = (unsigned int)::atoi(p);
-					if (ric > 0U)
-						m_whiteList.push_back(ric);
-					p = ::strtok(NULL, ",\r\n");
-				}
-			}
-			else if (::strcmp(key, "BlackList") == 0) {
-				char* p = ::strtok(value, ",\r\n");
-				while (p != NULL) {
-					unsigned int ric = (unsigned int)::atoi(p);
-					if (ric > 0U)
-						m_blackList.push_back(ric);
-					p = ::strtok(NULL, ",\r\n");
-				}
-			}
-			else if (::strcmp(key,"BlacklistRegexfile") == 0)
-				m_blacklistRegexfile = value;
-			else if (::strcmp(key,"WhitelistRegexfile") == 0)
-				m_whitelistRegexfile = value;
-			else if (::strcmp(key, "RptAddress") == 0)
-				m_rptAddress = value;
-			else if (::strcmp(key, "RptPort") == 0)
-				m_rptPort = (unsigned short)::atoi(value);
-			else if (::strcmp(key, "LocalAddress") == 0)
-				m_myAddress = value;
-			else if (::strcmp(key, "LocalPort") == 0)
-				m_myPort = (unsigned short)::atoi(value);
-			else if (::strcmp(key, "Daemon") == 0)
-				m_daemon = ::atoi(value) == 1;
-		} else if (section == SECTION_LOG) {
-			if (::strcmp(key, "FilePath") == 0)
-				m_logFilePath = value;
-			else if (::strcmp(key, "FileRoot") == 0)
-				m_logFileRoot = value;
-			else if (::strcmp(key, "FileLevel") == 0)
-				m_logFileLevel = (unsigned int)::atoi(value);
-			else if (::strcmp(key, "DisplayLevel") == 0)
-				m_logDisplayLevel = (unsigned int)::atoi(value);
-			else if (::strcmp(key, "FileRotate") == 0)
-				m_logFileRotate = ::atoi(value) == 1;
-		} else if (section == SECTION_DAPNET) {
-			if (::strcmp(key, "Address") == 0)
-				m_dapnetAddress = value;
-			else if (::strcmp(key, "Port") == 0)
-				m_dapnetPort = (unsigned short)::atoi(value);
-			else if (::strcmp(key, "AuthKey") == 0) {
-				for (unsigned int i = 0U; value[i] != '\0'; i++) {
-					if (!::isspace(value[i]))
-						m_dapnetAuthKey.insert(m_dapnetAuthKey.end(), 1, value[i]);
-				}
-			}
-			else if (::strcmp(key, "Debug") == 0)
-				m_dapnetDebug = ::atoi(value) == 1;
+		std::string key   = myTrim(line.substr(0U, pos));
+		std::string value = myTrim(line.substr(pos + 1U));
+
+		bool valid = true;
+
+		switch (m_section) {
+			case SECTION_GENERAL:
+				if (key == "Callsign")
+					m_callsign = value;
+				else if (key == "Timeout")
+					m_timeout = (unsigned int)::atoi(value.c_str());
+				else if (key == "Slot1")
+					m_slot1 = ::atoi(value.c_str()) == 1;
+				else if (key == "Slot2")
+					m_slot2 = ::atoi(value.c_str()) == 1;
+				else if (key == "RFH")
+					m_rfh = ::atoi(value.c_str()) == 1;
+				else if (key == "Latitude")
+					m_latitude = value;
+				else if (key == "Longitude")
+					m_longitude = value;
+				else if (key == "Description")
+					m_description = value;
+				else if (key == "WhiteList")
+					valid = readList(value, m_whiteList);
+				else if (key == "BlackList")
+					valid = readList(value, m_blackList);
+				else
+					valid = false;
+				break;
+
+			case SECTION_MQTT:
+				if (key == "Address")
+					m_mqttAddress = value;
+				else if (key == "Port")
+					m_mqttPort = (unsigned int)::atoi(value.c_str());
+				else if (key == "Login")
+					m_mqttLogin = value;
+				else if (key == "Password")
+					m_mqttPassword = value;
+				else if (key == "Debug")
+					m_mqttDebug = ::atoi(value.c_str()) == 1;
+				else
+					valid = false;
+				break;
+
+			case SECTION_LOGGING:
+				if (key == "DisplayLevel")
+					m_logDisplay = ::atoi(value.c_str()) == 1;
+				else if (key == "Level")
+					m_logLevel = (unsigned int)::atoi(value.c_str());
+				else if (key == "FilePath")
+					m_logFilePath = value;
+				else if (key == "FileRotate")
+					m_logFileRotate = ::atoi(value.c_str()) == 1;
+				else if (key == "FileSize")
+					m_logFileSize = (unsigned int)::atoi(value.c_str());
+				else if (key == "FileCount")
+					m_logFileCount = (unsigned int)::atoi(value.c_str());
+				else
+					valid = false;
+				break;
+
+			default:
+				::fprintf(stderr, "Unknown section in the .ini file - %s\n", line.c_str());
+				break;
 		}
+
+		if (!valid)
+			LogWarning("Invalid keyword/value in the .ini file - %s", line.c_str());
 	}
 
 	::fclose(fp);
@@ -184,9 +203,80 @@ bool CConf::read()
 	return true;
 }
 
+bool CConf::readList(const std::string& value, std::vector<unsigned int>& list) const
+{
+	list.clear();
+
+	if (value.empty())
+		return true;
+
+	std::string::size_type start = 0U;
+	while (start < value.size()) {
+		while (start < value.size() && value[start] == ',')
+			start++;
+
+		if (start == value.size())
+			break;
+
+		std::string::size_type end = value.find(',', start);
+		if (end == std::string::npos)
+			end = value.size();
+
+		std::string token = myTrim(value.substr(start, end - start));
+		if (!token.empty()) {
+			char* p = NULL;
+			unsigned long id = ::strtoul(token.c_str(), &p, 10);
+			if (p != NULL && *p != '\0') {
+				::fprintf(stderr, "Invalid numeric entry in list - %s\n", token.c_str());
+				return false;
+			}
+			list.push_back((unsigned int)id);
+		}
+
+		start = end;
+	}
+
+	return true;
+}
+
 std::string CConf::getCallsign() const
 {
 	return m_callsign;
+}
+
+unsigned int CConf::getTimeout() const
+{
+	return m_timeout;
+}
+
+bool CConf::getSlot1() const
+{
+	return m_slot1;
+}
+
+bool CConf::getSlot2() const
+{
+	return m_slot2;
+}
+
+bool CConf::getRFH() const
+{
+	return m_rfh;
+}
+
+std::string CConf::getLatitude() const
+{
+	return m_latitude;
+}
+
+std::string CConf::getLongitude() const
+{
+	return m_longitude;
+}
+
+std::string CConf::getDescription() const
+{
+	return m_description;
 }
 
 std::vector<uint32_t> CConf::getWhiteList() const
@@ -199,49 +289,39 @@ std::vector<uint32_t> CConf::getBlackList() const
 	return m_blackList;
 }
 
-std::string CConf::getblacklistRegexfile() const
+std::string CConf::getMQTTAddress() const
 {
-	return m_blacklistRegexfile;
+	return m_mqttAddress;
 }
 
-std::string CConf::getwhitelistRegexfile() const
+unsigned int CConf::getMQTTPort() const
 {
-	return m_whitelistRegexfile;
+	return m_mqttPort;
 }
 
-std::string CConf::getRptAddress() const
+std::string CConf::getMQTTLogin() const
 {
-	return m_rptAddress;
+	return m_mqttLogin;
 }
 
-unsigned short CConf::getRptPort() const
+std::string CConf::getMQTTPassword() const
 {
-	return m_rptPort;
+	return m_mqttPassword;
 }
 
-std::string CConf::getMyAddress() const
+bool CConf::getMQTTDebug() const
 {
-	return m_myAddress;
+	return m_mqttDebug;
 }
 
-unsigned short CConf::getMyPort() const
+bool CConf::getLogDisplay() const
 {
-	return m_myPort;
+	return m_logDisplay;
 }
 
-bool CConf::getDaemon() const
+unsigned int CConf::getLogLevel() const
 {
-	return m_daemon;
-}
-
-unsigned int CConf::getLogDisplayLevel() const
-{
-	return m_logDisplayLevel;
-}
-
-unsigned int CConf::getLogFileLevel() const
-{
-	return m_logFileLevel;
+	return m_logLevel;
 }
 
 std::string CConf::getLogFilePath() const
@@ -249,32 +329,17 @@ std::string CConf::getLogFilePath() const
 	return m_logFilePath;
 }
 
-std::string CConf::getLogFileRoot() const
-{
-	return m_logFileRoot;
-}
-
 bool CConf::getLogFileRotate() const
 {
 	return m_logFileRotate;
 }
 
-std::string CConf::getDAPNETAddress() const
+unsigned int CConf::getLogFileSize() const
 {
-	return m_dapnetAddress;
+	return m_logFileSize;
 }
 
-unsigned short CConf::getDAPNETPort() const
+unsigned int CConf::getLogFileCount() const
 {
-	return m_dapnetPort;
-}
-
-std::string CConf::getDAPNETAuthKey() const
-{
-	return m_dapnetAuthKey;
-}
-
-bool CConf::getDAPNETDebug() const
-{
-	return m_dapnetDebug;
+	return m_logFileCount;
 }
