@@ -1,88 +1,66 @@
-#if !defined(CONF_H)
-#define	CONF_H
+/*
+ *   Copyright (C) 2016,2017 by Jonathan Naylor G4KLX
+ *
+ *   This program is free software; you can redistribute it and/or modify
+ *   it under the terms of the GNU General Public License as published by
+ *   the Free Software Foundation; either version 2 of the License, or
+ *   (at your option) any later version.
+ */
 
-#include <cstdint>
+#ifndef CONF_H
+#define CONF_H
+
 #include <string>
 #include <vector>
+#include <cstdint>      // ← 新增：uint32_t
 
 class CConf
 {
 public:
-	enum SECTION {
-		SECTION_NONE,
-		SECTION_GENERAL,
-		SECTION_MQTT,
-		SECTION_LOGGING
-	};
+    CConf(const std::string& file);
+    ~CConf();
 
-	CConf(const std::string& file);
-	~CConf();
+    bool read();
 
-	bool read();
+    // 网关身份
+    std::string  getCallsign() const;
+    std::string  getPassword() const;
 
-	// Section General
-	std::string  getCallsign() const;
-	unsigned int getTimeout() const;
-	bool         getSlot1() const;
-	bool         getSlot2() const;
-	bool         getRFH() const;
-	std::string  getLatitude() const;
-	std::string  getLongitude() const;
-	std::string  getDescription() const;
-	std::vector<unsigned int> getWhiteList() const;
-	std::vector<unsigned int> getBlackList() const;
+    // DAPNET 主/备服务器
+    std::string  getMasterHost() const;
+    uint16_t     getMasterPort() const;
+    std::string  getBackupHost() const;
+    uint16_t     getBackupPort() const;
 
-	// Section MQTT
-	std::string  getMQTTAddress() const;
-	unsigned int getMQTTPort() const;
-	std::string  getMQTTLogin() const;
-	std::string  getMQTTPassword() const;
-	bool         getMQTTDebug() const;
+    // MMDVMHost 本地 UDP
+    std::string  getLocalHost() const;
+    uint16_t     getLocalPort() const;
 
-	// Section Logging
-	bool         getLogDisplay() const;
-	unsigned int getLogLevel() const;
-	std::string  getLogFilePath() const;
-	bool         getLogFileRotate() const;
-	unsigned int getLogFileSize() const;
-	unsigned int getLogFileCount() const;
+    // 黑白名单（统一 uint32_t，与 .cpp 严格一致）
+    std::vector<uint32_t> getWhiteList() const;
+    std::vector<uint32_t> getBlackList() const;
+
+    // 调试
+    bool         getDebug() const;
 
 private:
-	std::string m_file;
+    std::string  m_file;
 
-	SECTION m_section;
+    std::string  m_callsign;
+    std::string  m_password;
 
-	// Section General
-	std::string  m_callsign;
-	unsigned int m_timeout;
-	bool         m_slot1;
-	bool         m_slot2;
-	bool         m_rfh;
-	std::string  m_latitude;
-	std::string  m_longitude;
-	std::string  m_description;
-	std::vector<unsigned int> m_whiteList;
-	std::vector<unsigned int> m_blackList;
+    std::string  m_masterHost;
+    uint16_t     m_masterPort;
+    std::string  m_backupHost;
+    uint16_t     m_backupPort;
 
-	// Section MQTT
-	std::string  m_mqttAddress;
-	unsigned int m_mqttPort;
-	std::string  m_mqttLogin;
-	std::string  m_mqttPassword;
-	bool         m_mqttDebug;
+    std::string  m_localHost;
+    uint16_t     m_localPort;
 
-	// Section Logging
-	bool         m_logDisplay;
-	unsigned int m_logLevel;
-	std::string  m_logFilePath;
-	bool         m_logFileRotate;
-	unsigned int m_logFileSize;
-	unsigned int m_logFileCount;
+    std::vector<uint32_t> m_whiteList;
+    std::vector<uint32_t> m_blackList;
 
-	static bool      myIsSpace(int c);
-	static std::string myTrim(const std::string& s);
-
-	bool readList(const std::string& value, std::vector<unsigned int>& list) const;
+    bool         m_debug;
 };
 
 #endif /* CONF_H */
