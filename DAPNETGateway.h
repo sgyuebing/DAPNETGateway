@@ -44,9 +44,11 @@ private:
 	CDAPNETNetwork*             m_dapnetNetwork;
 	CPOCSAGNetwork*             m_pocsagNetwork;
 	std::deque<CPOCSAGMessage*> m_queue;
+	unsigned int                m_queueDrops;		// 队列满时被丢的最旧消息计数（可观测性）
 	CStopWatch                  m_slotTimer;
 	bool*                       m_schedule;
 	bool                        m_allSlots;
+	bool                        m_allSlotsAll;		// 16 时隙全归本台（应急全开模式）
 	unsigned int                m_currentSlot;
 	unsigned int                m_sentCodewords;
 	CREGEX*                     m_regexBlacklist;

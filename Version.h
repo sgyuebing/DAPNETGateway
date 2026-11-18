@@ -19,6 +19,7 @@
 #if !defined(VERSION_H)
 #define	VERSION_H
 
-const char* VERSION = "20201031";
+extern const char* VERSION;   // ★ 原为头文件内定义，GCC14 默认 -fno-common 下多 .o 链接必报 multiple definition
 
+// 实体在 Version.cpp 中定义一次。
 #endif

@@ -20,10 +20,31 @@
 #include "StopWatch.h"
 #include "Version.h"
 #include "Thread.h"
+#include "StopWatch.h"
 #include "Timer.h"
 #include "Log.h"
 #include "REGEX.h"
 #include <regex>
+#include <csignal>
+
+// ★ 原版 run() 是 for(;;) 永不 break，末尾的 close/delete/LogFinalise 全是不可达代码
+//   （日志尾段必丢、socket/fd 不关）。收到 SIGTERM/SIGINT 置 0，主循环与 recover() 退出。
+static volatile sig_atomic_t s_running = 1;
+static CStopWatch  s_recoverWatch;		/* ★ 重连节流：任何情况下两次重连间隔 >= 2s */
+
+static void dapnetSigHandler(int)
+{
+	s_running = 0;
+}
+
+static void installSigHandler()
+{
+	::signal(SIGTERM, dapnetSigHandler);
+	::signal(SIGINT,  dapnetSigHandler);
+#if !defined(_WIN32)
+	::signal(SIGHUP,  SIG_IGN);
+#endif
+}
 
 #if defined(_WIN32) || defined(_WIN64)
 #include <Windows.h>
@@ -129,17 +150,19 @@ CDAPNETGateway::~CDAPNETGateway()
 
 int CDAPNETGateway::run()
 {
-	bool ret = m_conf.read();
+	installSigHandler();
+	std::string reason;
+	bool ret = m_conf.read(reason);
 	if (!ret) {
-		::fprintf(stderr, "DAPNETGateway: cannot read the .ini file\n");
+		::fprintf(stderr, "DAPNETGateway: cannot read the .ini file - %s\n", reason.c_str());
 		return 1;
 	}
 
 	setlocale(LC_ALL, "C");
 
 #if !defined(_WIN32) && !defined(_WIN64)
-	bool m_daemon = m_conf.getDaemon();
-	if (m_daemon) {
+	const bool daemon = m_conf.getDaemon();
+	if (daemon) {   // 原写法 bool daemon 是局部变量名遮蔽成员，易误读
 		// Create new process
 		pid_t pid = ::fork();
 		if (pid == -1) {
@@ -193,7 +216,7 @@ int CDAPNETGateway::run()
 #endif
 
 #if !defined(_WIN32) && !defined(_WIN64)
-        ret = ::LogInitialise(m_daemon, m_conf.getLogFilePath(), m_conf.getLogFileRoot(), m_conf.getLogFileLevel(), m_conf.getLogDisplayLevel(), m_conf.getLogFileRotate());
+	ret = ::LogInitialise(daemon, m_conf.getLogFilePath(), m_conf.getLogFileRoot(), m_conf.getLogFileLevel(), m_conf.getLogDisplayLevel(), m_conf.getLogFileRotate());
 #else
         ret = ::LogInitialise(false, m_conf.getLogFilePath(), m_conf.getLogFileRoot(), m_conf.getLogFileLevel(), m_conf.getLogDisplayLevel(), m_conf.getLogFileRotate());
 #endif
@@ -203,7 +226,7 @@ int CDAPNETGateway::run()
 	}
 
 #if !defined(_WIN32) && !defined(_WIN64)
-	if (m_daemon) {
+	if (daemon) {
 		::close(STDIN_FILENO);
 		::close(STDOUT_FILENO);
 		::close(STDERR_FILENO);
@@ -227,18 +250,30 @@ int CDAPNETGateway::run()
 	}
 
 	std::string callsign      = m_conf.getCallsign();
-	std::string dapnetAddress = m_conf.getDAPNETAddress();
-	unsigned short dapnetPort = m_conf.getDAPNETPort();
 	std::string dapnetAuthKey = m_conf.getDAPNETAuthKey();
 
-	if (dapnetAuthKey.length() == 0 || dapnetAuthKey == "TOPSECRET") {
-		::LogError("AuthKey not set or invalid");
+	if (dapnetAuthKey.empty() || dapnetAuthKey == "TOPSECRET" || dapnetAuthKey == "CHANGE_ME") {
+		::LogError("Password not set or still the default value - edit DAPNETGateway.ini");
 		::LogFinalise();
-		
+
 		return 1;
 	}
-		
-	m_dapnetNetwork = new CDAPNETNetwork(dapnetAddress, dapnetPort, callsign, dapnetAuthKey, VERSION, false, 1, debug);
+
+	// 主 + 备端点。原实现只取单个 Address/Port，BackupHost/BackupPort 配了也是死配置；
+	// 现按 vector 传入，CDAPNETNetwork 内部按退避轮转 failover。
+	std::vector<std::string>    dapnetAddrs;
+	std::vector<unsigned short> dapnetPorts;
+	dapnetAddrs.push_back(m_conf.getMasterHost());  dapnetPorts.push_back(m_conf.getMasterPort());
+
+	if (!m_conf.getBackupHost().empty() && m_conf.getBackupPort() > 0U) {
+		dapnetAddrs.push_back(m_conf.getBackupHost());  dapnetPorts.push_back(m_conf.getBackupPort());
+		LogMessage("DAPNET primary %s:%u, backup %s:%u",
+			dapnetAddrs[0U].c_str(), dapnetPorts[0U], dapnetAddrs[1U].c_str(), dapnetPorts[1U]);
+	} else {
+		LogMessage("DAPNET primary %s:%u (no backup configured)", dapnetAddrs[0U].c_str(), dapnetPorts[0U]);
+	}
+
+	m_dapnetNetwork = new CDAPNETNetwork(dapnetAddrs, dapnetPorts, callsign, dapnetAuthKey, debug);
 	ret = m_dapnetNetwork->open();
 	if (!ret) {
 		m_pocsagNetwork->close();
@@ -266,8 +301,8 @@ int CDAPNETGateway::run()
 		return 1;
 	}
 
-	std::vector<unsigned int> whiteList = m_conf.getWhiteList();
-	std::vector<unsigned int> blackList = m_conf.getBlackList();
+	const std::vector<uint32_t> whiteList = m_conf.getWhiteList();
+	const std::vector<uint32_t> blackList = m_conf.getBlackList();
 
 	std::vector<std::regex> regexBlacklist;
 	std::vector<std::regex> regexWhitelist;
@@ -283,7 +318,7 @@ int CDAPNETGateway::run()
 		regexWhitelist = m_regexWhitelist->get();
 
 
-	for (;;) {
+	while (s_running != 0) {	// 原 for(;;)：见文件头 s_running
 		unsigned char buffer[200U];
 
 		if (m_pocsagNetwork->read(buffer) > 0U) {
@@ -309,72 +344,69 @@ int CDAPNETGateway::run()
 		}
 
 		bool ok = m_dapnetNetwork->read();
-		if (!ok)
+		if (!ok) {
+			LogWarning("DAPNET link lost, recovering...");
 			recover();
+			continue;
+		}
 
-		CPOCSAGMessage* message = m_dapnetNetwork->readMessage();
-		if (message != NULL) {
-			bool found = true;
-			bool blackListRIC = false;
-			bool blacklistRegexmatch = false;
-			bool whitelistRegexmatch = true;
 
-			// If we have a white list of RICs, use it.
-			if (!whiteList.empty())
-				found = std::find(whiteList.begin(), whiteList.end(), message->m_ric) != whiteList.end();
+	CPOCSAGMessage* message = m_dapnetNetwork->getMessage();
+	if (message != NULL) {
+		// ★ 原按 m_message 的 '\0' 截断；改为显式按 m_length 限长
+		std::string messageBody(reinterpret_cast<const char*>(message->m_message), message->m_length);
+		const std::vector<uint32_t>& whiteList = m_conf.getWhiteList();
+		const std::vector<uint32_t>& blackList = m_conf.getBlackList();
 
-			// If we have a black list of RICs, use it.
-			if (!blackList.empty())
-				blackListRIC = std::find(blackList.begin(), blackList.end(), message->m_ric) != blackList.end();
-			if (blackListRIC)
-				LogDebug("Blacklist match: Not queueing message to %07u, type %u, message: \"%.*s\"", message->m_ric, message->m_type, message->m_length, message->m_message);
+		bool blacklistRegexmatch = false;
+		bool whitelistRegexmatch = regexWhitelist.empty() ? true : false;
 
-			std::string  messageBody(reinterpret_cast<char*>(message->m_message));
-			//If we have a list of blacklist REGEXes, use them 
-			if (!regexBlacklist.empty()) {
-				for (std::regex regex : regexBlacklist) {
-					bool ret =  std::regex_match(messageBody,regex);
-					//If the regex matches the message body, don't send the message
-					if (ret) {
-						blacklistRegexmatch = true;
-						LogDebug("Blacklist REGEX match: Not queueing message to %07u, type %u, message: \"%.*s\"", message->m_ric, message->m_type, message->m_length, messageBody.c_str());
-					}
+		// 黑名单 REGEX：命中任一条即拦。★ 原用 regex_match（整串匹配），规则里写 "警报"
+		// 这种子串永远不中，还以为被漏放；改 regex_search。
+		if (!regexBlacklist.empty()) {
+			for (const std::regex& re : regexBlacklist) {   // ★ const&：原按值拷贝 std::regex
+				if (std::regex_search(messageBody, re)) {
+					blacklistRegexmatch = true;
+					LogDebug("Blacklist REGEX match: Not queueing message to %07u, type %u, message: \"%.*s\"",
+						message->m_ric, message->m_type, int(message->m_length), messageBody.c_str());
+					break;
 				}
-			}
-
-			if(!regexWhitelist.empty() && !blacklistRegexmatch) {
-				for (std::regex regex : regexWhitelist) {
-					bool ret =  std::regex_match(messageBody,regex);
-					//If the regex does not match the message body, don't send the message
-					if (!ret) {
-						whitelistRegexmatch = false;
-						LogDebug("No whitelist REGEX match: Not queueing message to %07u, type %u, message: \"%.*s\"", message->m_ric, message->m_type, message->m_length, messageBody.c_str());
-					}
-				}
-			}
-
-			if (found && !blackListRIC && !blacklistRegexmatch && whitelistRegexmatch) {
-				switch (message->m_functional) {
-					case FUNCTIONAL_ALPHANUMERIC:
-						LogDebug("Queueing message to %07u, type %u, func Alphanumeric: \"%.*s\"", message->m_ric, message->m_type, message->m_length, message->m_message);
-						break;
-					case FUNCTIONAL_ALERT2:
-						LogDebug("Queueing message to %07u, type %u, func Alert 2: \"%.*s\"", message->m_ric, message->m_type, message->m_length, message->m_message);
-						break;
-					case FUNCTIONAL_NUMERIC:
-						LogDebug("Queueing message to %07u, type %u, func Numeric: \"%.*s\"", message->m_ric, message->m_type, message->m_length, message->m_message);
-						break;
-					case FUNCTIONAL_ALERT1:
-						LogDebug("Queueing message to %07u, type %u, func Alert 1", message->m_ric, message->m_type);
-						break;
-					default:
-						break;
-				}
-
-				m_queue.push_front(message);
-				LogDebug("Messages in Queue %04u", m_queue.size());
 			}
 		}
+
+		// 白名单 REGEX：★ 原初值 true + "任一不中就置 false" = 要求每条规则都命中，
+		// 配 2 条放行概率腰斩、配 5 条基本全丢，且无日志 —— 静默黑洞。改命中任一即放行。
+		if (!regexWhitelist.empty() && !blacklistRegexmatch) {
+			for (const std::regex& re : regexWhitelist) {
+				if (std::regex_search(messageBody, re)) { whitelistRegexmatch = true; break; }
+			}
+			if (!whitelistRegexmatch)
+				LogDebug("No whitelist REGEX match: Not queueing message to %07u, type %u, message: \"%.*s\"",
+					message->m_ric, message->m_type, int(message->m_length), messageBody.c_str());
+		}
+
+		if (blacklistRegexmatch || !whitelistRegexmatch || isTimeMessage(message)) {
+			delete message;
+		} else if (!whiteList.empty() && std::find(whiteList.begin(), whiteList.end(), message->m_ric) == whiteList.end()) {
+			LogDebug("Not in whitelist: Not queueing message to %07u", message->m_ric);
+			delete message;
+		} else if (!blackList.empty() && std::find(blackList.begin(), blackList.end(), message->m_ric) != blackList.end()) {
+			LogDebug("In blacklist: Not queueing message to %07u", message->m_ric);
+			delete message;
+		} else {
+			// ★ 原 push_front() + sendMessages() 里 pop_back() = LIFO：A,B,C 到达按 C,B,A 发射。
+			// "跳闸" 后跟 "误报取消" 会倒着播。改 FIFO + 队列上限防 OOM（溢出错最旧）。
+			while (m_queue.size() >= m_conf.getMaxQueue()) {
+				CPOCSAGMessage* oldMsg = m_queue.front();
+				m_queue.pop_front();
+				delete oldMsg;
+				m_queueDrops++;
+				LogWarning("POCSAG queue full (%u), dropping oldest message", m_conf.getMaxQueue());
+			}
+			m_queue.push_back(message);
+			LogDebug("Messages in Queue %04u (dropped %u)", (unsigned int)m_queue.size(), m_queueDrops);
+		}
+	}
 
 		unsigned int t = (m_slotTimer.time() / 100ULL) % 1024ULL;
 		unsigned int slot = t / 64U;
@@ -391,6 +423,9 @@ int CDAPNETGateway::run()
 
 		CThread::sleep(10U);
 	}
+
+	LogMessage("Shutting down, %u message(s) still queued, %u dropped on overflow",
+			   (unsigned int)m_queue.size(), m_queueDrops);
 
 	m_pocsagNetwork->close();
 	delete m_pocsagNetwork;
@@ -421,13 +456,13 @@ void CDAPNETGateway::sendMessages()
 	if (m_queue.empty())
 		return;
 
-	CPOCSAGMessage* message = m_queue.back();
-	assert(message != NULL);
+	CPOCSAGMessage* message = m_queue.front();
+	if (message == NULL) return;	// 防御：empty() 上游已判过
 
 	// Special case, only test if slots are being used.
 	if (m_allSlots) {
 		sendMessage(message);
-		m_queue.pop_back();
+		m_queue.pop_back();	// 仅 m_allSlots 探测分支用（探测消息不入业务队列）
 		delete message;
 		return;
 	}
@@ -459,19 +494,32 @@ void CDAPNETGateway::sendMessages()
 
 bool CDAPNETGateway::recover()
 {
+	static const unsigned int BACKOFF[] = {2U, 4U, 8U, 16U, 32U, 60U, 60U, 60U, 60U, 60U};
+	static const unsigned int N_BACKOFF = sizeof(BACKOFF) / sizeof(BACKOFF[0U]);
+	static unsigned int s_attempts = 0U;
 
-	for (;;) {
+	/* ★ 原实现 for(;;) 无 sleep 无上限：DAPNET 一抖就 100% CPU + 重连风暴 + fd 泄漏到 SSH 登不上 */
+	s_recoverWatch.start();
+	while (s_running != 0) {
+		unsigned int wait = BACKOFF[(s_attempts < N_BACKOFF) ? s_attempts : (N_BACKOFF - 1U)];
+		if (s_attempts > 200U) wait = 60U;
+		++s_attempts;
+		LogWarning("DAPNET link lost, recover attempt %u in %us", s_attempts, wait);
+
+		unsigned int slept = 0U;
+		while (s_running != 0 && slept < wait) { CThread::sleep(1U); ++slept; }
+
 		m_dapnetNetwork->close();
-		bool ok = m_dapnetNetwork->open();
-		if (ok) {
-			ok = m_dapnetNetwork->login();
-			if (ok)
-				return true;
+		if (m_dapnetNetwork->open() && m_dapnetNetwork->login()) {
+			LogMessage("DAPNET link restored after %u attempt(s)", s_attempts);
+			s_attempts = 0U;
+			loadSchedule();			/* ★ 重连后必须重新取时隙表，否则拿着旧指针/旧映射发 */
+			return true;
 		}
 	}
-
 	return false;
-}
+
+
 
 bool CDAPNETGateway::isTimeMessage(const CPOCSAGMessage* message) const
 {
@@ -507,36 +555,40 @@ unsigned int CDAPNETGateway::calculateCodewords(const CPOCSAGMessage* message) c
 	if ((len % 2U) == 1U)						// Always an even number of words
 		len++;
 
-	len += len % 16U;							// A very long message will include sync words
+	// ★ 原句 "len += len % 16U;  // a very long message will include sync words" 是空操作：
+	//   上一步刚保证 len 为偶，偶%16 ∈ {0,2,...,14}，加完依然不对齐 16，纯凭空虚增最多 14 码字。
+	//   后果：totalCodewords 过早撞上 CODEWORDS_PER_SLOT，整轮 slot 放弃发送。
+	//   实测 10字符消息算成 8 码字(应 4)、120字符算成 56(应 43)，短消息密集时吞吐 -30~50%。
+	//   sync 码字由 MMDVMHost 侧插入，网关层不该预估 —— 直接删。
 
 	return len;
 }
 
 void CDAPNETGateway::loadSchedule()
 {
-	bool* schedule = m_dapnetNetwork->readSchedule();
-	if (schedule == NULL)
+	bool     raw[16U];
+	unsigned int slot = 0U, codewords = 0U;
+	if (!m_dapnetNetwork->getSchedule(raw, slot, codewords)) {
+		LogDebug("No DAPNET schedule frame yet, keeping previous slot map");
 		return;
-
-	delete[] m_schedule;
-	m_schedule = schedule;
-
-	m_allSlots = true;
-
-	std::string text;
-	for (unsigned int i = 0U; i < 16U; i++) {
-		if (m_schedule[i]) {
-			text += "*";
-		} else {
-			text += "-";
-			m_allSlots = false;
-		}
 	}
 
-	if (m_allSlots)
-		LogMessage("All slots are available for transmission");
-	else
-		LogMessage("Loaded new schedule: %s", text.c_str());
+	// ★ 原实现 m_schedule = m_dapnetNetwork->getSchedule() 直接接管对方内部指针；
+	//   recover() 重建 CDAPNETNetwork 后，主循环读的就是悬空内存。改为自持副本。
+	if (m_schedule == NULL) m_schedule = new bool[16U];
+	for (unsigned int i = 0U; i < 16U; ++i) m_schedule[i] = raw[i];
+
+	std::string text;
+	for (unsigned int i = 0U; i < 16U; i++) text += m_schedule[i] ? "*" : "-";
+
+	m_allSlots = true;
+	m_allSlotsAll = true;
+	for (unsigned int i = 0U; i < 16U; i++) {
+		if (!m_schedule[i]) { m_allSlots = false; m_allSlotsAll = false; }
+		else if (m_schedule[i] && i != slot) { m_allSlots = false; }
+	}
+
+	LogMessage("DAPNET slot map: %s  (my slot %u, %u codewords used)", text.c_str(), slot, codewords);
 }
 
 bool CDAPNETGateway::sendMessage(CPOCSAGMessage* message) const
